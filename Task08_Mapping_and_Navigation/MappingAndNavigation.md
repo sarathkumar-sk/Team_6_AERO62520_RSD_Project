@@ -1,4 +1,4 @@
-<h1 align="center"> Mapping and Navigation with ROS2 </h1>
+<h1 align="center"> Mapping and Navigation with ROS </h1>
 
 The [Navigation Stack](https://navigation.ros.org/) (Nav2) for ROS2 provides a ready built solution for mapping and navigation for mobile robots.
 
