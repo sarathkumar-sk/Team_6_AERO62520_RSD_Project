@@ -411,8 +411,18 @@ export ROS_DOMAIN_ID=YOUR_GROUP_NUMBER
 
 After saving, run `source ~/.bashrc` or open a new terminal to apply the change. This ensures only your team can communicate with your robot arm.
 
+### 6. Change runscript.sh
 
-### 6. Launch MoveIt2 Demo
+```bash
+#!/bin/bash
+sshpass -p "Elephant" ssh -X -tt er@192.168.12.2 << EOF
+source /opt/ros/jazzy/setup.bash
+source ~/elephant_arm_ws/install/setup.bash
+ros2 launch mycobot_280pi slider_control.launch.py gui:=false
+EOF
+```
+
+### 7. Launch MoveIt2 Demo
 
 ```bash
 ros2 launch mycobot_280_moveit2 demo.launch.py
