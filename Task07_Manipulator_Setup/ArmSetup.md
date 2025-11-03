@@ -387,7 +387,7 @@ mv MSc-manipulator-task src
 ### 2. Install Dependencies
 
 ```bash
-rosdep install --from-paths src -y --ignore-src
+sudo apt install ros-jazzy-moveit ros-jazzy-moveit-resources-panda-moveit-config
 ```
 
 ### 3. Build the Workspace
