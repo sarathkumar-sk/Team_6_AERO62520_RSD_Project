@@ -433,3 +433,6 @@ ros2 launch mycobot_280_moveit2 demo.launch.py
 
 Familiarise yourself with the moveit2 simulation before it is tested on the actual robot. This can be done by varying the sliders to see how the robot moves and then testing it with the actual robot.
 
+---
+## Installing mycobot 280pi with ubuntu 24.04 and ros jazzy
+
