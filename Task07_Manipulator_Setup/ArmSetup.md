@@ -436,4 +436,186 @@ Familiarise yourself with the moveit2 simulation before it is tested on the actu
 
 ---
 ## Installing mycobot 280pi with ubuntu 24.04 and ros jazzy
+## Setup Guide
+
+### Flash the SD Card
+
+As shared on MS Teams, download the `.img` file. Remove the SD card from the base of the manipulator.
+
+We will use the build in Disks utility to flash the image onto the SD card.
+
+<p align="center">
+    <img title="disk1" src="https://github.com/UoMMScRobotics/maniupulator-jazzy/blob/4d775245b05734a16eab930f339125fcebc825c5/Images/disks.png" width="60%"/>
+</p>
+<p align="center">
+    <img title="disk2" src="https://github.com/UoMMScRobotics/maniupulator-jazzy/blob/4d775245b05734a16eab930f339125fcebc825c5/Images/disks_flash.png" width="60%"/>
+</p>
+<p align="center">
+    <img title="disk3" src="https://github.com/UoMMScRobotics/maniupulator-jazzy/blob/4d775245b05734a16eab930f339125fcebc825c5/Images/disks_flash_2.png" width="60%"/>
+</p>
+
+Once the SD card is flashed re-insert back into the manipulator. 
+
+> [!IMPORTANT]
+> Downloading and flashing the image can take a long time. Why not reach the Understanding and [Troubleshooting ROS 2 Networking and Communication Guide](https://github.com/UoMMScRobotics/UOMDocumentationForLeoRover/blob/main/Further_reading/Networking.md) while you wait?
+
+### First Boot Steps
+
+This tutorial sets up a basic peer to peer wired network between the pi and another device (such as your NUC or laptop). This is to get you going, you will need to revise this set up when you consider your system architecture.
+
+> [!WARNING]
+> If previously you've set up up static IP addresses using `99-wired-static.yaml` then remove it using `sudo rm /etc/netplan/99-wired-static.yaml`, then `sudo netplan apply` to apply the change.
+
+The pi will boot into the default user `elephant` which uses the password `trunk`. The pi has a static IP address, `10.3.14.59` (a little π humour).
+
+Check the network on the pi, it should be set up as below.
+<p align="center">
+    <img title="Network" src="https://github.com/UoMMScRobotics/maniupulator-jazzy/blob/4d775245b05734a16eab930f339125fcebc825c5/Images/Network.png" width="60%"/>
+</p>
+<p align="center">
+    <img title="Network" src="https://github.com/UoMMScRobotics/maniupulator-jazzy/blob/4d775245b05734a16eab930f339125fcebc825c5/Images/Network_mani_pi.png" width="60%"/>
+</p>
+
+**ROS2 Environment Setup on the pi:**  
+We can automate sourcing our ROS workspace by appending instructions to **the end of** the `.bashrc` script.
+
+ ```
+ nano ~/.bashrc
+ ```
+ Scorll down to the bottom of the file and add:
+ Ensure you replace `YOUR_GROUP_NUMBER' with an int value.
+ ```bash
+ # Source ROS Jazzy setup with error checking
+if source /opt/ros/jazzy/setup.bash; then
+  echo "Sourced /opt/ros/jazzy/setup.bash successfully"
+else
+  echo "Failed to source /opt/ros/jazzy/setup.bash"
+fi
+
+# Explicit setting of DDS
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+echo "DDS set to $RMW_IMPLEMENTATION"
+
+# Source your workspace setup with error checking
+if source ~/colcon_ws/install/setup.bash; then
+  echo "Sourced ~/colcon_ws/install/setup.bash successfully"
+else
+  echo "Failed to source ~/colcon_ws/install/setup.bash"
+fi
+
+# Export and print ROS_DOMAIN_ID
+export ROS_DOMAIN_ID=YOUR_GROUP_NUMBER
+echo "ROS_DOMAIN_ID is set to $ROS_DOMAIN_ID"
+
+# ROS_LOCALHOST_ONLY is being fazed out but is good for a quick set up
+export ROS_LOCALHOST_ONLY=0
+echo "ROS_LOCALHOST_ONLY is set to $ROS_LOCALHOST_ONLY"
+
+echo "To change this automation, use nano to edit ~/.bashrc and the source ~/.bashrc to apply."
+ ```
+ Exit nano (CTRL+X) and save.
+
+ After saving, apply the changes by running:
+ ```bash
+ source ~/.bashrc
+ ```
+
+**Test Servos:**  
+ Launch the slider test:
+ ```bash
+ ros2 launch mycobot_280pi slider_control.launch.py
+ ```
+> [!WARNING]
+> Avoid using the `Randomize` button. This interface does not contrain the manipulator. Random joint configurations may cause the arm to attempt to move through the table or other objects.
+---
+
+
+**Laptop/NUC setup**  
+
+> [!WARNING]
+> If previously you've set up up static IP addresses using `99-wired-static.yaml` then remove it using `sudo rm /etc/netplan/99-wired-static.yaml`, then `sudo netplan apply` to apply the change.
+> 
+Now let's set up your laptop/NUC for our peer to peer wired network. Ensure you have ROS Jazzy installed on the device and you have the ethernet cable plugged into both your device and the raspberry pi. 
+Again we can automate sourcing our ROS workspace by appending instructions to **the end of** the `.bashrc` script.
+Ensure you replace `YOUR_GROUP_NUMBER' with an int value.
+```
+# Source ROS Jazzy setup with error checking
+if source /opt/ros/jazzy/setup.bash; then
+  echo "Sourced /opt/ros/jazzy/setup.bash successfully"
+else
+  echo "Failed to source /opt/ros/jazzy/setup.bash"
+fi
+
+# Delcare the DDS
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+echo "Explicilty set fast DDS"
+
+
+# Export and print ROS_DOMAIN_ID
+export ROS_DOMAIN_ID=10
+echo "ROS_DOMAIN_ID is set to $ROS_DOMAIN_ID"
+echo "To change this automation, use nano to edit ~/.bashrc and the source ~/.bashrc to apply."
+
+# For quick setup use ROS_LOCALHOST_ONLY, do revise later
+export ROS_LOCALHOST_ONLY=0
+echo "ROS_LOCALHOST_ONLY set to $ROS_LOCALHOST_ONLY"
+```
+ Exit nano (CTRL+X) and save.
+
+ After saving, apply the changes by running:
+ ```bash
+ source ~/.bashrc
+ ```
+
+**Test the set up**
+
+On the raspberry pi run: `ros2 launch mycobot_280pi slider_control.launch.py`. Leave that running and turn your attention to your other device and run: `ros2 topic list`. You should be able to see the topics running on your arm from your NUC/Laptop.
+
+**Remote Access**
+
+You are not required to use a monitor and pherierals everytime you want to use your raspberry pi. You can remove access the device, in this set up we use the static IP and can SSH.
+```
+ssh elephant@10.3.14.59
+```
+The password being `trunk`.
+Any issues with SSH please see troubleshooting.
+
+### Troubleshooting
+
+* General check
+   * In a multi system setup ensure the DDS is being used, check by runing `ros2 doctor --report` on all machines
+
+* Find out more with verbose 
+   ```
+   ssh -vvv elephant@10.3.14.59
+   ```
+
+* Issues with `known_hosts` try:
+   ```
+   ssh-keygen -R 10.3.14.59
+   ```
+* Check the device you're trying to SSH from has the SSH client
+   ```
+   ssh -V
+   #sudo apt install openssh-client #if needed
+   ```
+
+* Check the device you're trying to SSH into has the SSH server
+```
+# Check if the SSH server (sshd) service is running
+sudo systemctl status ssh
+
+# Start the SSH server immediately (if it's installed but not running)
+sudo systemctl start ssh
+
+# Enable the SSH server to start automatically at boot
+sudo systemctl enable ssh
+
+# Install the OpenSSH server package (if it's not already installed)
+sudo apt update && sudo apt install -y openssh-server
+```
+
+* Issues with hanging when trying to SSH, or Black GUI with Gazebo.
+   * Please the [Troubleshooting ROS 2 Networking and Communication Guide](https://github.com/UoMMScRobotics/UOMDocumentationForLeoRover/blob/main/Further_reading/Networking.md), where it will explain the background context and provide a fix.
+
 
