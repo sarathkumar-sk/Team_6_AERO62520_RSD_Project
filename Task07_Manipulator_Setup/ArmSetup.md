@@ -388,6 +388,7 @@ mv MSc-manipulator-task src
 
 ```bash
 sudo apt install ros-jazzy-moveit ros-jazzy-moveit-resources-panda-moveit-config
+sudo apt install ros-jazzy-joint-state-broadcaster ros-jazzy-joint-trajectory-controller
 ```
 
 ### 3. Build the Workspace
