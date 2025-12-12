@@ -5,7 +5,6 @@
 ![ROS 2 Jazzy](https://img.shields.io/badge/ROS_2-Jazzy-22314E?style=for-the-badge&logo=ros&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Leo_Rover-orange?style=for-the-badge)
 ![Compute](https://img.shields.io/badge/Compute-Intel_NUC-0071C5?style=for-the-badge&logo=intel&logoColor=white)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen?style=for-the-badge)
 
 ## 📌 Project Overview
 This repository contains the source code for **Team 6's Autonomous Mobile Manipulator**. The system is designed to autonomously explore a structured arena, detect coloured cubes using computer vision, and sort them into designated bins using a 6-DOF robotic arm.
