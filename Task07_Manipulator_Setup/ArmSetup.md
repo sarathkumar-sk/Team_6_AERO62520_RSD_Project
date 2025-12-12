@@ -21,7 +21,7 @@
    - [Source the Workspace](#4-source-the-workspace)
    - [Set the ROS_DOMAIN_ID on your system](#5-set-the-ros_domain_id-on-your-system)
    - [Launch MoveIt2 Demo](#6-launch-moveit2-demo)
-8.[Installing mycobot 280pi with ubuntu 24.04 and ros jazzy](#installing-mycobot-280pi-with-ubuntu-2404-and-ros-jazzy)
+8. [Installing mycobot 280pi with ubuntu 24.04 and ros jazzy](#installing-mycobot-280pi-with-ubuntu-2404-and-ros-jazzy)
 ---
 
 ## Key Specifications
