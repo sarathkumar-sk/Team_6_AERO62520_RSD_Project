@@ -1,6 +1,6 @@
-
-<img title="UoM_Logo"  src="/Images/Sensor/Uom.png"  width=40% height=auto>
 # Team 6: Autonomous Mobile Manipulator (MSc Robotics)
+<img title="UoM_Logo"  src="/Images/Sensor/Uom.png"  width=40% height=auto>
+
 
 ![ROS 2 Jazzy](https://img.shields.io/badge/ROS_2-Jazzy-22314E?style=for-the-badge&logo=ros&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Leo_Rover-orange?style=for-the-badge)
