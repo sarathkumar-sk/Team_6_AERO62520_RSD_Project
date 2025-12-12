@@ -21,7 +21,7 @@
    - [Source the Workspace](#4-source-the-workspace)
    - [Set the ROS_DOMAIN_ID on your system](#5-set-the-ros_domain_id-on-your-system)
    - [Launch MoveIt2 Demo](#6-launch-moveit2-demo)
-
+8.[Installing mycobot 280pi with ubuntu 24.04 and ros jazzy](#Installing-mycobot-280pi-with-ubuntu-24.04-and-ros-jazzy)
 ---
 
 ## Key Specifications
@@ -407,7 +407,7 @@ Repeat the ROS_DOMAIN_ID setup on your own machine to ensure network isolation b
 Add the following line to your `~/.bashrc`, replacing `YOUR_GROUP_NUMBER` with your assigned number:
 
 ```bash
-export ROS_DOMAIN_ID=YOUR_GROUP_NUMBER
+export ROS_DOMAIN_ID=6
 ```
 
 After saving, run `source ~/.bashrc` or open a new terminal to apply the change. This ensures only your team can communicate with your robot arm.
@@ -504,7 +504,7 @@ else
 fi
 
 # Export and print ROS_DOMAIN_ID
-export ROS_DOMAIN_ID=YOUR_GROUP_NUMBER
+export ROS_DOMAIN_ID=6
 echo "ROS_DOMAIN_ID is set to $ROS_DOMAIN_ID"
 
 # ROS_LOCALHOST_ONLY is being fazed out but is good for a quick set up
@@ -552,7 +552,7 @@ echo "Explicilty set fast DDS"
 
 
 # Export and print ROS_DOMAIN_ID
-export ROS_DOMAIN_ID=10
+export ROS_DOMAIN_ID=6
 echo "ROS_DOMAIN_ID is set to $ROS_DOMAIN_ID"
 echo "To change this automation, use nano to edit ~/.bashrc and the source ~/.bashrc to apply."
 
