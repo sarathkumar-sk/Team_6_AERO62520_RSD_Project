@@ -1,1 +1,0 @@
-Invoking command in '/home/team6/ros_ws/build/leo_nav': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --build /home/team6/ros_ws/build/leo_nav -- -j16 -l16
