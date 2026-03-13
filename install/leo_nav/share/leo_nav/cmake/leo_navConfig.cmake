@@ -1,1 +1,0 @@
-/home/team6/ros_ws/build/leo_nav/ament_cmake_core/leo_navConfig.cmake

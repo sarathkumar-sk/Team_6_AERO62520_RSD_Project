@@ -1,1 +1,0 @@
-/home/team6/ros_ws/src/leo_navigation_tutorial/launch/amcl.launch.py
