@@ -1,0 +1,3 @@
+[console_scripts]
+explore = nav2_wfd.wavefront_frontier:main
+frontier_explore = nav2_wfd.front:main

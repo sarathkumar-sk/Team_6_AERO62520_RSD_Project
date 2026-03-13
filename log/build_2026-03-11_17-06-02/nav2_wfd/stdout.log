@@ -1,0 +1,27 @@
+running egg_info
+writing ../../build/nav2_wfd/nav2_wfd.egg-info/PKG-INFO
+writing dependency_links to ../../build/nav2_wfd/nav2_wfd.egg-info/dependency_links.txt
+writing entry points to ../../build/nav2_wfd/nav2_wfd.egg-info/entry_points.txt
+writing requirements to ../../build/nav2_wfd/nav2_wfd.egg-info/requires.txt
+writing top-level names to ../../build/nav2_wfd/nav2_wfd.egg-info/top_level.txt
+reading manifest file '../../build/nav2_wfd/nav2_wfd.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file '../../build/nav2_wfd/nav2_wfd.egg-info/SOURCES.txt'
+running build
+running build_py
+copying nav2_wfd/wavefront_frontier.py -> /home/team6/ros_ws/build/nav2_wfd/build/lib/nav2_wfd
+copying nav2_wfd/front.py -> /home/team6/ros_ws/build/nav2_wfd/build/lib/nav2_wfd
+running install
+running install_lib
+copying /home/team6/ros_ws/build/nav2_wfd/build/lib/nav2_wfd/wavefront_frontier.py -> /home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd
+copying /home/team6/ros_ws/build/nav2_wfd/build/lib/nav2_wfd/front.py -> /home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd
+byte-compiling /home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd/wavefront_frontier.py to wavefront_frontier.cpython-312.pyc
+byte-compiling /home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd/front.py to front.cpython-312.pyc
+running install_data
+running install_egg_info
+removing '/home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd-0.0.0-py3.12.egg-info' (and everything under it)
+Copying ../../build/nav2_wfd/nav2_wfd.egg-info to /home/team6/ros_ws/install/nav2_wfd/lib/python3.12/site-packages/nav2_wfd-0.0.0-py3.12.egg-info
+running install_scripts
+Installing explore script to /home/team6/ros_ws/install/nav2_wfd/lib/nav2_wfd
+Installing frontier_explore script to /home/team6/ros_ws/install/nav2_wfd/lib/nav2_wfd
+writing list of installed files to '/home/team6/ros_ws/build/nav2_wfd/install.log'
