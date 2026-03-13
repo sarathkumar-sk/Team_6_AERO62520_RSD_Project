@@ -1,9 +1,0 @@
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/uninstall.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/leo_nav_uninstall.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/test.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/edit_cache.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/rebuild_cache.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/list_install_components.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/install.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/install/local.dir
-/home/team6/ros_ws/build/leo_nav/CMakeFiles/install/strip.dir
