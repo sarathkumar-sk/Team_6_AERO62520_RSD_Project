@@ -28,9 +28,9 @@ class CubeGraspNode(Node):
         super().__init__("cube_grasp_node")
 
         # --- Frame names ---
-        self.robot_base_frame  = "g_base"                    # robot_base_frame from easyhandeye2 calibration
-        self.camera_frame      = "camera_color_optical_frame" # tracking_base_frame from easyhandeye2 calibration
-        self.tf_timeout        = Duration(seconds=1.0)
+        self.robot_base_frame = "g_base"                    # robot_base_frame from easyhandeye2 calibration
+        self.camera_frame = "camera_color_optical_frame" # tracking_base_frame from easyhandeye2 calibration
+        self.tf_timeout = Duration(seconds=1.0)
 
         # --- TF2: used to look up the easyhandeye2 calibration transform ---
         self.tf_buffer   = Buffer()
@@ -48,7 +48,7 @@ class CubeGraspNode(Node):
             end_effector_name="joint6_flange",  # adjust to your URDF EE link
             group_name="arm"                    # adjust to your MoveIt SRDF group
         )
-        self.moveit2.max_velocity    = 0.2
+        self.moveit2.max_velocity = 0.2
         self.moveit2.max_acceleration = 0.2
 
         # --- myCobot280Pi gripper via pymycobot SDK ---
