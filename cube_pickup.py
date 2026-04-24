@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cube_grasp_node.py
+cube_pickup.py
 -------------------
 Listens for a cube pose on /cube_pose_camera, transforms it into the robot
 base frame using TF2, and executes a pick sequence with MoveIt2.
