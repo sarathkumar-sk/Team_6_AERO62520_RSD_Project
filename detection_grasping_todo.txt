@@ -20,6 +20,7 @@ cube_grasp.py:
 -----------------------------------------------------------
 grasp_test_interactive.py:
 
+- Arm group name
 - Myabe check dummy cube and box positions
 - Add gripper close/open depending on service/topic
 
