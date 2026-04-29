@@ -1,0 +1,21 @@
+RSPD LAB TODO:
+
+
+cube_detection.py:
+
+- Check HSV values
+- Cube dimensions
+-----------------------------------------------------------
+box_detection.py:
+
+- (HSV values)
+-----------------------------------------------------------
+cube_grasp.py:
+
+- Find arm group name
+- Add transformation values
+- Check finger length (from end-effector to target gripper spot. Or change end effector to grip, but probably would have to add the other gripper joints.
+- def _close_gripper - See if there is a ros2 gripper service (Option A) or topic (Option B)
+- Add mirror of _close_gripper to _open_gripper
+- 
+
