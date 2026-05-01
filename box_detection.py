@@ -265,9 +265,8 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    except Exception as e:
+        print(e)
 
 
 if __name__ == "__main__":
