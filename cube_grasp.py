@@ -2,23 +2,28 @@
 """
 cube_grasp_node.py
 -------------------
-Detects a cube via /cube_pose_camera, and if it is within MAX_GRASP_DIST
-metres of the robot base, executes a single pick sequence.
+Detects a cube via /cube_pose_camera and executes a single pick sequence
+if the cube is within MAX_GRASP_DIST metres of the robot base.
 
-Motion uses the raw MoveGroup action client (same pattern as
-controller_that_worked.py) — no pymoveit2 required.
+TCP offset
+----------
+There is 10 cm between joint6_flange (what MoveIt2 controls) and the
+actual fingertip grip point.  Every Cartesian target is therefore raised
+by TCP_OFFSET so that the FINGERS reach the intended position, not the
+flange.
+
+  flange_target_z = intended_grip_z + TCP_OFFSET
+
+All offsets below are defined relative to the GRIP POINT (intuitive),
+and TCP_OFFSET is added automatically in _move_to_pose().
 
 State machine:
   IDLE  ──►  PICKING  ──►  DONE
-                │ (on error)
-                └──────────►  IDLE
+               │ (on error)
+               └──────────►  IDLE  (allows retry)
 
 Subscriptions:
   /cube_pose_camera  (geometry_msgs/PoseStamped)
-
-Requires:
-  - MoveIt2 move_group node running
-  - Hand-eye calibration values filled in below
 """
 
 import enum
@@ -43,16 +48,16 @@ from moveit_msgs.msg import (
 )
 from shape_msgs.msg import SolidPrimitive
 import tf2_ros
-import tf2_geometry_msgs          # noqa: F401 — registers PoseStamped support
+import tf2_geometry_msgs          # noqa: F401
 from tf2_ros import StaticTransformBroadcaster
 
 
 # ===========================================================================
-# CONFIGURATION — edit these to match your setup
+# CONFIGURATION
 # ===========================================================================
 
-GROUP_NAME_ARM     = "arm_group"       # CHANGE: verify in your .srdf
-GROUP_NAME_GRIPPER = "gripper"         # CHANGE: verify in your .srdf
+GROUP_NAME_ARM     = "arm_group"      # CHANGE: verify in your .srdf
+GROUP_NAME_GRIPPER = "gripper"        # CHANGE: verify in your .srdf
 
 ARM_JOINT_NAMES = [
     "joint2_to_joint1",
@@ -68,16 +73,25 @@ GRIPPER_JOINT_NAMES = ["gripper_controller"]  # CHANGE: verify against /joint_st
 BASE_LINK = "g_base"
 EEF_LINK  = "joint6_flange"
 
-# Home position joint angles (radians)
-# CHANGE: jog the arm to a safe resting pose and read from `ros2 topic echo /joint_states`
+# Home joint angles (radians)
+# CHANGE: jog to a safe resting pose and read from `ros2 topic echo /joint_states`
 HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Gripper joint values
-GRIPPER_OPEN   =  0.0   # CHANGE: open position (from controller_that_worked.py)
-GRIPPER_CLOSED = -0.7   # CHANGE: closed position (from controller_that_worked.py)
+GRIPPER_OPEN   =  0.0   # CHANGE
+GRIPPER_CLOSED = -0.7   # CHANGE
 
-# Only attempt a grasp if the cube is closer than this distance (metres)
-# from the robot base origin.
+# ------------------------------------------------------------------
+# TCP (Tool Centre Point) offset
+# Distance from joint6_flange to the actual fingertip grip point.
+# MoveIt2 moves joint6_flange to the commanded position, so every
+# target must be raised by this amount so the FINGERS reach the
+# intended location.
+#
+# CHANGE if your gripper is a different length.
+# ------------------------------------------------------------------
+TCP_OFFSET = 0.10   # 10 cm
+
+# Only attempt a grasp if the cube is closer than this (metres)
 MAX_GRASP_DIST = 0.25   # 25 cm
 
 # Motion tuning
@@ -86,13 +100,15 @@ ACCELERATION_SCALE = 0.15
 PLANNING_TIME      = 5.0
 PLANNING_ATTEMPTS  = 10
 
-# Grasp offsets (metres, in robot base Z direction)
-PRE_GRASP_Z_OFFSET = 0.10   # hover above cube before descending
-GRASP_Z_OFFSET     = 0.07   # descend to this height above cube centre
-LIFT_Z_OFFSET      = 0.20   # lift to this height after closing gripper
+# ------------------------------------------------------------------
+# Grasp offsets — all defined relative to the CUBE CENTRE (grip point).
+# TCP_OFFSET is added automatically inside _move_to_pose().
+# ------------------------------------------------------------------
+PRE_GRASP_Z_OFFSET = 0.10   # fingertip hovers 10 cm above cube before descent
+GRASP_Z_OFFSET     = 0.07   # fingertip descends to 7 cm above cube centre
+LIFT_Z_OFFSET      = 0.20   # fingertip lifts to 20 cm above cube after gripping
 
-# EEF orientation: tool pointing straight down
-# Quaternion [x=1, y=0, z=0, w=0] = 180° rotation around X
+# EEF pointing straight down  [x, y, z, w]
 # CHANGE if your EEF convention differs — verify in RViz
 DOWN_QUAT = Quaternion(x=1.0, y=0.0, z=0.0, w=0.0)
 
@@ -101,9 +117,9 @@ DOWN_QUAT = Quaternion(x=1.0, y=0.0, z=0.0, w=0.0)
 # State enum
 # ===========================================================================
 class State(enum.Enum):
-    IDLE    = "IDLE"     # waiting for a close-enough cube detection
-    PICKING = "PICKING"  # pick sequence running in background thread
-    DONE    = "DONE"     # pick complete — stays here until restarted
+    IDLE    = "IDLE"
+    PICKING = "PICKING"
+    DONE    = "DONE"
 
 
 # ===========================================================================
@@ -114,49 +130,30 @@ class CubeGraspNode(Node):
     def __init__(self):
         super().__init__("cube_grasp_node")
 
-        # ------------------------------------------------------------------
-        # 1. Hand-eye static transform
-        # ------------------------------------------------------------------
         self._publish_hand_eye_transform()
 
-        # ------------------------------------------------------------------
-        # 2. TF2
-        # ------------------------------------------------------------------
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # ------------------------------------------------------------------
-        # 3. MoveGroup action client (same as controller_that_worked.py)
-        # ------------------------------------------------------------------
         self._action_client = ActionClient(self, MoveGroup, "move_action")
         self.get_logger().info("Waiting for MoveGroup action server …")
         self._action_client.wait_for_server()
         self.get_logger().info("MoveGroup connected ✓")
 
-        # ------------------------------------------------------------------
-        # 4. State
-        # ------------------------------------------------------------------
         self._state_lock = threading.Lock()
         self._state      = State.IDLE
 
-        # ------------------------------------------------------------------
-        # 5. Subscription
-        # ------------------------------------------------------------------
-        self.create_subscription(
-            PoseStamped,
-            "/cube_pose_camera",
-            self._cube_pose_cb,
-            10,
-        )
+        self._latest_cube_pose: PoseStamped | None = None
 
-        # 2 Hz trigger timer
+        self.create_subscription(
+            PoseStamped, "/cube_pose_camera", self._cube_pose_cb, 10
+        )
         self.create_timer(0.5, self._tick)
 
         self.get_logger().info(
-            f"CubeGraspNode ready — will grasp cubes within {MAX_GRASP_DIST} m"
+            f"CubeGraspNode ready — TCP_OFFSET={TCP_OFFSET} m  "
+            f"MAX_GRASP_DIST={MAX_GRASP_DIST} m"
         )
-
-        self._latest_cube_pose: PoseStamped | None = None
 
     # -----------------------------------------------------------------------
     # Hand-eye transform
@@ -181,13 +178,13 @@ class CubeGraspNode(Node):
         self.get_logger().info("Published static hand-eye transform")
 
     # -----------------------------------------------------------------------
-    # Detection callback — just store latest
+    # Detection callback
     # -----------------------------------------------------------------------
     def _cube_pose_cb(self, msg: PoseStamped):
         self._latest_cube_pose = msg
 
     # -----------------------------------------------------------------------
-    # Tick (2 Hz) — decides whether to launch a pick
+    # Tick — triggers pick when cube is close enough
     # -----------------------------------------------------------------------
     def _tick(self):
         with self._state_lock:
@@ -196,17 +193,14 @@ class CubeGraspNode(Node):
             if self._latest_cube_pose is None:
                 return
             pose_snap              = self._latest_cube_pose
-            self._latest_cube_pose = None   # consume
+            self._latest_cube_pose = None
 
-        # Transform to base frame to measure actual distance
         try:
             cube_in_base: PoseStamped = self.tf_buffer.transform(
-                pose_snap,
-                BASE_LINK,
-                timeout=Duration(seconds=1.0),
+                pose_snap, BASE_LINK, timeout=Duration(seconds=1.0)
             )
         except Exception as e:
-            self.get_logger().warn(f"TF transform failed in tick: {e}")
+            self.get_logger().warn(f"TF transform failed: {e}")
             return
 
         cx = cube_in_base.pose.position.x
@@ -220,32 +214,28 @@ class CubeGraspNode(Node):
 
         if dist > MAX_GRASP_DIST:
             self.get_logger().info(
-                f"Cube is {dist:.3f} m away — beyond {MAX_GRASP_DIST} m threshold, ignoring"
+                f"Cube {dist:.3f} m away — beyond {MAX_GRASP_DIST} m, ignoring"
             )
             return
 
-        self.get_logger().info(f"Cube is within range ({dist:.3f} m) — starting pick")
+        self.get_logger().info(f"Cube within range ({dist:.3f} m) — starting pick")
 
         with self._state_lock:
             self._state = State.PICKING
 
-        thread = threading.Thread(
-            target=self._pick_sequence,
-            args=(cube_in_base,),
-            daemon=True,
-        )
-        thread.start()
+        threading.Thread(
+            target=self._pick_sequence, args=(cube_in_base,), daemon=True
+        ).start()
 
     # -----------------------------------------------------------------------
-    # MoveGroup helpers (directly from controller_that_worked.py)
+    # MoveGroup helpers
     # -----------------------------------------------------------------------
     def _send_joint_goal(self, group_name: str, joint_names: list, positions: list):
-        """Send a joint-space goal and block until complete."""
         goal = MoveGroup.Goal()
-        goal.request.group_name                     = group_name
-        goal.request.num_planning_attempts          = PLANNING_ATTEMPTS
-        goal.request.allowed_planning_time          = PLANNING_TIME
-        goal.request.max_velocity_scaling_factor    = VELOCITY_SCALE
+        goal.request.group_name                      = group_name
+        goal.request.num_planning_attempts           = PLANNING_ATTEMPTS
+        goal.request.allowed_planning_time           = PLANNING_TIME
+        goal.request.max_velocity_scaling_factor     = VELOCITY_SCALE
         goal.request.max_acceleration_scaling_factor = ACCELERATION_SCALE
 
         con = Constraints()
@@ -259,7 +249,6 @@ class CubeGraspNode(Node):
             con.joint_constraints.append(jc)
 
         goal.request.goal_constraints.append(con)
-
         future = self._action_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future)
         handle = future.result()
@@ -267,27 +256,34 @@ class CubeGraspNode(Node):
             res_future = handle.get_result_async()
             rclpy.spin_until_future_complete(self, res_future)
             result = res_future.result()
-            if result:
-                code = result.result.error_code.val
-                if code != 1:
-                    self.get_logger().warn(f"Joint goal finished with error code {code}")
+            if result and result.result.error_code.val != 1:
+                self.get_logger().warn(
+                    f"Joint goal error code {result.result.error_code.val}"
+                )
         else:
-            self.get_logger().error("Joint goal was REJECTED by MoveGroup")
+            self.get_logger().error("Joint goal REJECTED")
 
     def _move_to_pose(self, x: float, y: float, z: float, label: str):
-        """Send a Cartesian pose goal and block until complete."""
-        self.get_logger().info(f"  → Moving to {label} ({x:.3f}, {y:.3f}, {z:.3f})")
+        """
+        Move the flange so that the FINGERTIPS reach (x, y, z).
+        TCP_OFFSET is added to z here — callers always pass the
+        intended grip position, never the flange position.
+        """
+        flange_z = z + TCP_OFFSET
+        self.get_logger().info(
+            f"  → {label}  grip=({x:.3f}, {y:.3f}, {z:.3f})  "
+            f"flange z={flange_z:.3f} (grip + {TCP_OFFSET} m TCP)"
+        )
 
         goal = MoveGroup.Goal()
-        goal.request.group_name                     = GROUP_NAME_ARM
-        goal.request.num_planning_attempts          = PLANNING_ATTEMPTS
-        goal.request.allowed_planning_time          = PLANNING_TIME
-        goal.request.max_velocity_scaling_factor    = VELOCITY_SCALE
+        goal.request.group_name                      = GROUP_NAME_ARM
+        goal.request.num_planning_attempts           = PLANNING_ATTEMPTS
+        goal.request.allowed_planning_time           = PLANNING_TIME
+        goal.request.max_velocity_scaling_factor     = VELOCITY_SCALE
         goal.request.max_acceleration_scaling_factor = ACCELERATION_SCALE
 
         con = Constraints(name="goal")
 
-        # Position constraint — 2 mm sphere (same as controller_that_worked.py)
         pos = PositionConstraint()
         pos.header.frame_id = BASE_LINK
         pos.link_name       = EEF_LINK
@@ -296,20 +292,19 @@ class CubeGraspNode(Node):
         target_pose         = PoseStamped()
         target_pose.pose.position.x = x
         target_pose.pose.position.y = y
-        target_pose.pose.position.z = z
+        target_pose.pose.position.z = flange_z     # ← flange target
         bv.primitives.append(prim)
         bv.primitive_poses.append(target_pose.pose)
         pos.constraint_region = bv
 
-        # Orientation constraint — tool pointing down
         ori = OrientationConstraint()
-        ori.header.frame_id              = BASE_LINK
-        ori.link_name                    = EEF_LINK
-        ori.orientation                  = DOWN_QUAT
-        ori.absolute_x_axis_tolerance    = 0.1
-        ori.absolute_y_axis_tolerance    = 0.1
-        ori.absolute_z_axis_tolerance    = 0.1
-        ori.weight                       = 1.0
+        ori.header.frame_id           = BASE_LINK
+        ori.link_name                 = EEF_LINK
+        ori.orientation               = DOWN_QUAT
+        ori.absolute_x_axis_tolerance = 0.1
+        ori.absolute_y_axis_tolerance = 0.1
+        ori.absolute_z_axis_tolerance = 0.1
+        ori.weight                    = 1.0
 
         con.position_constraints.append(pos)
         con.orientation_constraints.append(ori)
@@ -322,18 +317,17 @@ class CubeGraspNode(Node):
             res_future = handle.get_result_async()
             rclpy.spin_until_future_complete(self, res_future)
             result = res_future.result()
-            if result:
-                code = result.result.error_code.val
-                if code != 1:
-                    self.get_logger().warn(
-                        f"Pose goal '{label}' finished with error code {code} "
-                        f"(1=SUCCESS, -5=NO_IK, -6=UNREACHABLE)"
-                    )
+            if result and result.result.error_code.val != 1:
+                self.get_logger().warn(
+                    f"Pose goal '{label}' error code "
+                    f"{result.result.error_code.val} "
+                    f"(1=SUCCESS -5=NO_IK -6=UNREACHABLE)"
+                )
         else:
-            self.get_logger().error(f"Pose goal '{label}' was REJECTED by MoveGroup")
+            self.get_logger().error(f"Pose goal '{label}' REJECTED")
 
     # -----------------------------------------------------------------------
-    # Gripper helpers
+    # Gripper / home
     # -----------------------------------------------------------------------
     def _open_gripper(self):
         self.get_logger().info("  → Opening gripper")
@@ -348,35 +342,37 @@ class CubeGraspNode(Node):
         self._send_joint_goal(GROUP_NAME_ARM, ARM_JOINT_NAMES, HOME_JOINTS)
 
     # -----------------------------------------------------------------------
-    # Pick sequence — runs once in its own thread
+    # Pick sequence
     # -----------------------------------------------------------------------
     def _pick_sequence(self, cube_in_base: PoseStamped):
+        # These are the GRIP POINT positions (fingertip, not flange).
+        # _move_to_pose() automatically adds TCP_OFFSET to reach the flange.
         cx = cube_in_base.pose.position.x
         cy = cube_in_base.pose.position.y
         cz = cube_in_base.pose.position.z
 
         try:
             self.get_logger().info(
-                f"=== PICK sequence — cube at ({cx:.3f}, {cy:.3f}, {cz:.3f}) ==="
+                f"=== PICK — cube grip point ({cx:.3f}, {cy:.3f}, {cz:.3f}) ==="
             )
 
-            # 1 — open gripper first so we don't knock the cube on approach
+            # 1 — open gripper before approaching
             self._open_gripper()
             time.sleep(0.4)
 
-            # 2 — hover above cube
+            # 2 — hover fingertips PRE_GRASP_Z_OFFSET above cube
             self._move_to_pose(cx, cy, cz + PRE_GRASP_Z_OFFSET, "pre-grasp")
             time.sleep(0.3)
 
-            # 3 — descend to grasp height
+            # 3 — descend fingertips to GRASP_Z_OFFSET above cube
             self._move_to_pose(cx, cy, cz + GRASP_Z_OFFSET, "grasp")
             time.sleep(0.3)
 
-            # 4 — close gripper
+            # 4 — grip
             self._close_gripper()
             time.sleep(0.6)
 
-            # 5 — lift
+            # 5 — lift fingertips LIFT_Z_OFFSET above cube
             self._move_to_pose(cx, cy, cz + LIFT_Z_OFFSET, "lift")
             time.sleep(0.3)
 
@@ -384,15 +380,14 @@ class CubeGraspNode(Node):
             self._go_home()
 
             self.get_logger().info("=== PICK complete ✓ ===")
-
             with self._state_lock:
                 self._state = State.DONE
 
         except Exception as e:
             self.get_logger().error(f"Pick sequence exception: {e}")
-            self._open_gripper()   # safety: don't stay closed
+            self._open_gripper()
             with self._state_lock:
-                self._state = State.IDLE   # allow retry
+                self._state = State.IDLE
 
 
 # ===========================================================================
