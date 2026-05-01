@@ -153,6 +153,11 @@ class CubePlaceNode(Node):
         self._action_client.wait_for_server()
         self.get_logger().info("MoveGroup connected ✓")
 
+        self.get_logger().info("Closing gripper at startup …")
+        self._close_gripper()
+        time.sleep(0.5)
+
+
         self._state_lock = threading.Lock()
         self._state      = State.IDLE
 
