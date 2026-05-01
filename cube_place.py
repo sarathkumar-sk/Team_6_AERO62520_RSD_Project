@@ -3,9 +3,20 @@
 cube_place_node.py
 -------------------
 Assumes the arm is already holding a cube (gripper closed).
-Subscribes to /box_pose_camera from realsense_box_publisher.py,
-transforms the box position into the robot base frame, and executes
-a single drop sequence into the 20×20×20 cm box.
+Subscribes to /box_pose_camera from realsense_box_publisher, transforms
+the box position into the robot base frame, and executes a single drop
+sequence into the 20×20×20 cm box.
+
+TCP offset
+----------
+There is 10 cm between joint6_flange (what MoveIt2 controls) and the
+actual fingertip grip point.  Every Cartesian target is therefore raised
+by TCP_OFFSET so that the FINGERS reach the intended position.
+
+  flange_target_z = intended_position_z + TCP_OFFSET
+
+All offsets below are defined relative to the BOX geometry (intuitive),
+and TCP_OFFSET is added automatically in _move_to_pose().
 
 State machine:
   IDLE  ──►  PLACING  ──►  DONE
@@ -13,13 +24,8 @@ State machine:
                └──────────►  IDLE  (allows retry)
 
 Subscriptions:
-  /box_pose_camera  (geometry_msgs/PoseStamped)  — from realsense_box_publisher
+  /box_pose_camera  (geometry_msgs/PoseStamped)
   /box_color        (std_msgs/String)
-
-Requires:
-  - MoveIt2 move_group node running
-  - Arm already holding cube (gripper closed) before this node starts
-  - Hand-eye calibration values filled in below
 """
 
 import enum
@@ -70,54 +76,46 @@ GRIPPER_JOINT_NAMES = ["gripper_controller"]  # CHANGE: verify against /joint_st
 BASE_LINK = "g_base"
 EEF_LINK  = "joint6_flange"
 
-# Home joint angles — arm returns here after placing
-# CHANGE: jog to a safe resting pose and read from `ros2 topic echo /joint_states`
-HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # CHANGE
 
-# Gripper values (matching cube_grasp_node.py)
 GRIPPER_OPEN   =  0.0   # CHANGE
 GRIPPER_CLOSED = -0.7   # CHANGE
 
 # ------------------------------------------------------------------
+# TCP (Tool Centre Point) offset
+# Distance from joint6_flange to the actual fingertip grip point.
+# CHANGE if your gripper is a different length.
+# ------------------------------------------------------------------
+TCP_OFFSET = 0.10   # 10 cm
+
+# ------------------------------------------------------------------
 # Box geometry
-# The box is 20×20×20 cm.
-# realsense_box_publisher gives us the position of the nearest face
-# of the box as seen by the camera (side wall or top rim depending
-# on camera angle).
-#
-# We convert that to the box opening centre by adding BOX_HEIGHT_M
-# upward in the robot base Z direction — this is where we want to
-# release the cube.
-#
-# BOX_WALL_M is already applied inside realsense_box_publisher
-# (box_half_wall_m = 0.005), so we don't double-count it here.
+# The box is 20×20×20 cm with its open top facing up.
+# realsense_box_publisher gives us the nearest face centre in the
+# camera frame, which after TF transform into g_base gives us a
+# position at roughly the base/floor level of the box.
 # ------------------------------------------------------------------
-BOX_HEIGHT_M = 0.20    # full height of the box (metres)
+BOX_HEIGHT_M = 0.20   # full internal height of the box (metres)
 
 # ------------------------------------------------------------------
-# Approach offsets (in robot base Z direction)
+# Place offsets — defined relative to the BOX OPENING (top rim).
+# TCP_OFFSET is added automatically inside _move_to_pose().
 #
-# The detected box pose Z is the floor-level position of the box face.
-# We add BOX_HEIGHT_M to get to the top opening, then add further
-# offsets to control approach and release height.
+#   SAFE_HOVER_ABOVE_RIM — fingertips this far ABOVE the rim on approach.
+#                          Clears the box walls if the detected pose
+#                          has small errors.
 #
-#   SAFE_HOVER_ABOVE_RIM — how far above the box rim to hover before
-#                          descending.  Keeps the arm clear of the
-#                          box walls if the box pose has some error.
-#
-#   RELEASE_INSIDE_BOX   — how far below the rim to open the gripper.
-#                          Positive = inside the box.
-#                          E.g. 0.05 = 5 cm below the rim.
-#                          Keep this small so the cube doesn't fall far.
+#   RELEASE_BELOW_RIM    — fingertips this far BELOW the rim to release.
+#                          Keeps the drop height short so the cube
+#                          doesn't bounce out.
 # ------------------------------------------------------------------
-SAFE_HOVER_ABOVE_RIM = 0.10   # 10 cm above box opening
-RELEASE_INSIDE_BOX   = 0.05   # 5 cm below box rim (inside box)
+SAFE_HOVER_ABOVE_RIM = 0.10   # 10 cm above rim
+RELEASE_BELOW_RIM    = 0.05   # 5 cm below rim (inside box)
 
-# Only accept a box detection if it is within this distance from
-# the robot base.  Prevents acting on a far-away false positive.
-MAX_PLACE_DIST = 0.70   # metres  — CHANGE to suit your workspace
+# Only accept a box within this distance from the robot base
+MAX_PLACE_DIST = 0.70   # metres — CHANGE to suit your workspace
 
-# Motion tuning — keep conservative while testing
+# Motion tuning
 VELOCITY_SCALE     = 0.15
 ACCELERATION_SCALE = 0.15
 PLANNING_TIME      = 5.0
@@ -132,9 +130,9 @@ DOWN_QUAT = Quaternion(x=1.0, y=0.0, z=0.0, w=0.0)
 # State enum
 # ===========================================================================
 class State(enum.Enum):
-    IDLE    = "IDLE"     # waiting for a close-enough box detection
-    PLACING = "PLACING"  # place sequence running
-    DONE    = "DONE"     # complete — stays here until process is restarted
+    IDLE    = "IDLE"
+    PLACING = "PLACING"
+    DONE    = "DONE"
 
 
 # ===========================================================================
@@ -145,37 +143,22 @@ class CubePlaceNode(Node):
     def __init__(self):
         super().__init__("cube_place_node")
 
-        # ------------------------------------------------------------------
-        # 1. Hand-eye static transform (same values as cube_grasp_node.py)
-        # ------------------------------------------------------------------
         self._publish_hand_eye_transform()
 
-        # ------------------------------------------------------------------
-        # 2. TF2
-        # ------------------------------------------------------------------
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # ------------------------------------------------------------------
-        # 3. MoveGroup action client
-        # ------------------------------------------------------------------
         self._action_client = ActionClient(self, MoveGroup, "move_action")
         self.get_logger().info("Waiting for MoveGroup action server …")
         self._action_client.wait_for_server()
         self.get_logger().info("MoveGroup connected ✓")
 
-        # ------------------------------------------------------------------
-        # 4. State
-        # ------------------------------------------------------------------
         self._state_lock = threading.Lock()
         self._state      = State.IDLE
 
         self._latest_box_pose  : PoseStamped | None = None
         self._latest_box_color : str | None         = None
 
-        # ------------------------------------------------------------------
-        # 5. Subscriptions
-        # ------------------------------------------------------------------
         self.create_subscription(
             PoseStamped, "/box_pose_camera", self._box_pose_cb, 10
         )
@@ -183,15 +166,15 @@ class CubePlaceNode(Node):
             String, "/box_color", self._box_color_cb, 10
         )
 
-        # 2 Hz trigger timer
         self.create_timer(0.5, self._tick)
 
         self.get_logger().info(
-            f"CubePlaceNode ready — will place into box within {MAX_PLACE_DIST} m"
+            f"CubePlaceNode ready — TCP_OFFSET={TCP_OFFSET} m  "
+            f"MAX_PLACE_DIST={MAX_PLACE_DIST} m"
         )
 
     # -----------------------------------------------------------------------
-    # Hand-eye transform — CHANGE values to match your calibration
+    # Hand-eye transform
     # -----------------------------------------------------------------------
     def _publish_hand_eye_transform(self):
         self._static_broadcaster = StaticTransformBroadcaster(self)
@@ -200,7 +183,7 @@ class CubePlaceNode(Node):
         t.header.frame_id = BASE_LINK
         t.child_frame_id  = "camera_depth_optical_frame"
 
-        # CHANGE: paste your hand-eye calibration values
+        # CHANGE: your hand-eye calibration values
         t.transform.translation.x =  0.10901317268405636
         t.transform.translation.y =  0.004291147472906663
         t.transform.translation.z = -0.0021601816053998316
@@ -222,7 +205,7 @@ class CubePlaceNode(Node):
         self._latest_box_color = msg.data
 
     # -----------------------------------------------------------------------
-    # Tick (2 Hz) — triggers place when a close-enough box is seen
+    # Tick — triggers place when a close-enough box is detected
     # -----------------------------------------------------------------------
     def _tick(self):
         with self._state_lock:
@@ -232,18 +215,15 @@ class CubePlaceNode(Node):
                 return
             pose_snap              = self._latest_box_pose
             color_snap             = self._latest_box_color
-            self._latest_box_pose  = None   # consume
+            self._latest_box_pose  = None
             self._latest_box_color = None
 
-        # Transform to base frame first so we can measure real distance
         try:
             box_in_base: PoseStamped = self.tf_buffer.transform(
-                pose_snap,
-                BASE_LINK,
-                timeout=Duration(seconds=1.0),
+                pose_snap, BASE_LINK, timeout=Duration(seconds=1.0)
             )
         except Exception as e:
-            self.get_logger().warn(f"TF transform failed in tick: {e}")
+            self.get_logger().warn(f"TF transform failed: {e}")
             return
 
         bx = box_in_base.pose.position.x
@@ -258,26 +238,23 @@ class CubePlaceNode(Node):
 
         if dist > MAX_PLACE_DIST:
             self.get_logger().info(
-                f"Box is {dist:.3f} m away — beyond {MAX_PLACE_DIST} m threshold, ignoring"
+                f"Box {dist:.3f} m away — beyond {MAX_PLACE_DIST} m, ignoring"
             )
             return
 
-        self.get_logger().info(
-            f"Box within range ({dist:.3f} m) — starting place sequence"
-        )
+        self.get_logger().info(f"Box within range ({dist:.3f} m) — starting place")
 
         with self._state_lock:
             self._state = State.PLACING
 
-        thread = threading.Thread(
+        threading.Thread(
             target=self._place_sequence,
             args=(box_in_base, color_snap),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     # -----------------------------------------------------------------------
-    # MoveGroup helpers (identical pattern to cube_grasp_node.py)
+    # MoveGroup helpers
     # -----------------------------------------------------------------------
     def _send_joint_goal(self, group_name: str, joint_names: list, positions: list):
         goal = MoveGroup.Goal()
@@ -298,7 +275,6 @@ class CubePlaceNode(Node):
             con.joint_constraints.append(jc)
 
         goal.request.goal_constraints.append(con)
-
         future = self._action_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future)
         handle = future.result()
@@ -306,15 +282,24 @@ class CubePlaceNode(Node):
             res_future = handle.get_result_async()
             rclpy.spin_until_future_complete(self, res_future)
             result = res_future.result()
-            if result:
-                code = result.result.error_code.val
-                if code != 1:
-                    self.get_logger().warn(f"Joint goal finished with error code {code}")
+            if result and result.result.error_code.val != 1:
+                self.get_logger().warn(
+                    f"Joint goal error code {result.result.error_code.val}"
+                )
         else:
-            self.get_logger().error("Joint goal was REJECTED by MoveGroup")
+            self.get_logger().error("Joint goal REJECTED")
 
     def _move_to_pose(self, x: float, y: float, z: float, label: str):
-        self.get_logger().info(f"  → Moving to {label} ({x:.3f}, {y:.3f}, {z:.3f})")
+        """
+        Move the flange so that the FINGERTIPS reach (x, y, z).
+        TCP_OFFSET is added to z here — callers always pass the
+        intended fingertip position, never the flange position.
+        """
+        flange_z = z + TCP_OFFSET
+        self.get_logger().info(
+            f"  → {label}  fingertip=({x:.3f}, {y:.3f}, {z:.3f})  "
+            f"flange z={flange_z:.3f} (fingertip + {TCP_OFFSET} m TCP)"
+        )
 
         goal = MoveGroup.Goal()
         goal.request.group_name                      = GROUP_NAME_ARM
@@ -333,7 +318,7 @@ class CubePlaceNode(Node):
         target_pose         = PoseStamped()
         target_pose.pose.position.x = x
         target_pose.pose.position.y = y
-        target_pose.pose.position.z = z
+        target_pose.pose.position.z = flange_z     # ← flange target
         bv.primitives.append(prim)
         bv.primitive_poses.append(target_pose.pose)
         pos.constraint_region = bv
@@ -358,18 +343,17 @@ class CubePlaceNode(Node):
             res_future = handle.get_result_async()
             rclpy.spin_until_future_complete(self, res_future)
             result = res_future.result()
-            if result:
-                code = result.result.error_code.val
-                if code != 1:
-                    self.get_logger().warn(
-                        f"Pose goal '{label}' finished with error code {code} "
-                        f"(1=SUCCESS, -5=NO_IK, -6=UNREACHABLE)"
-                    )
+            if result and result.result.error_code.val != 1:
+                self.get_logger().warn(
+                    f"Pose goal '{label}' error code "
+                    f"{result.result.error_code.val} "
+                    f"(1=SUCCESS -5=NO_IK -6=UNREACHABLE)"
+                )
         else:
-            self.get_logger().error(f"Pose goal '{label}' was REJECTED by MoveGroup")
+            self.get_logger().error(f"Pose goal '{label}' REJECTED")
 
     # -----------------------------------------------------------------------
-    # Gripper / home helpers
+    # Gripper / home
     # -----------------------------------------------------------------------
     def _open_gripper(self):
         self.get_logger().info("  → Opening gripper")
@@ -384,62 +368,58 @@ class CubePlaceNode(Node):
         self._send_joint_goal(GROUP_NAME_ARM, ARM_JOINT_NAMES, HOME_JOINTS)
 
     # -----------------------------------------------------------------------
-    # Place sequence — runs once in its own thread
+    # Place sequence
     # -----------------------------------------------------------------------
     def _place_sequence(self, box_in_base: PoseStamped, color: str):
         bx = box_in_base.pose.position.x
         by = box_in_base.pose.position.y
-        bz = box_in_base.pose.position.z   # floor / base of box face from camera
+        bz = box_in_base.pose.position.z   # base/floor level of box
 
-        # The box publisher gives us the nearest face centre.
-        # Since the camera is likely looking at the side of the box,
-        # bz in the robot base frame corresponds to roughly floor level.
-        # The box opening is at bz + BOX_HEIGHT_M.
-        box_top_z    = bz + BOX_HEIGHT_M
-        hover_z      = box_top_z + SAFE_HOVER_ABOVE_RIM     # safe approach height
-        release_z    = box_top_z - RELEASE_INSIDE_BOX       # inside the box
+        # Compute key heights in terms of fingertip position.
+        # _move_to_pose() will add TCP_OFFSET on top of each of these.
+        box_rim_z    = bz + BOX_HEIGHT_M                      # top opening of box
+        hover_z      = box_rim_z + SAFE_HOVER_ABOVE_RIM       # safe approach
+        release_z    = box_rim_z - RELEASE_BELOW_RIM          # inside the box
 
         try:
             self.get_logger().info(
-                f"=== PLACE sequence — {color} box at "
-                f"({bx:.3f}, {by:.3f}, {bz:.3f}) ==="
+                f"=== PLACE — {color} box base at ({bx:.3f}, {by:.3f}, {bz:.3f}) ==="
             )
             self.get_logger().info(
-                f"    box top z={box_top_z:.3f}  "
-                f"hover z={hover_z:.3f}  "
-                f"release z={release_z:.3f}"
+                f"    rim z={box_rim_z:.3f}  "
+                f"hover fingertip z={hover_z:.3f}  "
+                f"release fingertip z={release_z:.3f}  "
+                f"(flange will be {TCP_OFFSET} m higher)"
             )
 
-            # 1 — Hover above box opening at safe height
+            # 1 — hover fingertips above box rim
             self._move_to_pose(bx, by, hover_z, "hover above box")
             time.sleep(0.3)
 
-            # 2 — Lower to release height (inside box)
+            # 2 — lower fingertips to release point inside box
             self._move_to_pose(bx, by, release_z, "release point")
             time.sleep(0.3)
 
-            # 3 — Open gripper — cube drops into box
+            # 3 — open gripper — cube drops
             self._open_gripper()
             time.sleep(0.5)
 
-            # 4 — Retreat straight back up out of box
+            # 4 — retreat fingertips back above rim
             self._move_to_pose(bx, by, hover_z, "retreat above box")
             time.sleep(0.3)
 
-            # 5 — Return arm to home
+            # 5 — return arm to home
             self._go_home()
 
             self.get_logger().info("=== PLACE complete ✓ ===")
-
             with self._state_lock:
                 self._state = State.DONE
 
         except Exception as e:
             self.get_logger().error(f"Place sequence exception: {e}")
-            # Safety: open gripper so cube doesn't stay trapped if arm stalls
-            self._open_gripper()
+            self._open_gripper()   # safety: don't hold cube if something goes wrong
             with self._state_lock:
-                self._state = State.IDLE   # allow retry
+                self._state = State.IDLE
 
 
 # ===========================================================================
