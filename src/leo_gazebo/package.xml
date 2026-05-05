@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>leo_gazebo</name>
+  <version>0.0.0</version>
+  <description>Gazebo simulation package for Leo</description>
+  <maintainer email="student41@todo.todo">student41</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>leo_description</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

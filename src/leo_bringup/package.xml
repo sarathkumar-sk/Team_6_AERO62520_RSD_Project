@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>leo_bringup</name>
+  <version>0.0.0</version>
+  <description>One-click bringup package for Leo Gazebo simulation, bridge, SLAM and RViz.</description>
+
+  <maintainer email="student41@todo.todo">student41</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>leo_gazebo</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
