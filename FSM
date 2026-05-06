@@ -1,0 +1,797 @@
+from unittest import result
+
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from rclpy.time import Duration
+from enum import Enum, auto
+import time
+
+import json
+
+#ROS2 TF2
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+import tf2_geometry_msgs
+
+#ROS2 message
+from std_msgs.msg import String, Bool
+from geometry_msgs.msg import PoseStamped, Pose
+from sensor_msgs.msg import Image
+
+#Nav2
+from nav2_msgs.action import NavigateToPose
+
+#MoveIt2
+from moveit_msgs.action import MoveGroup
+from moveit_msgs.msg import (
+    MoveItErrorCodes, BoundingVolume, Constraints, 
+    JointConstraint, OrientationConstraint, PositionConstraint
+)
+from geometry_msgs.msg import Quaternion
+from shape_msgs.msg import SolidPrimitive
+
+# 
+BASE_LINK = "g_base"
+EEF_LINK  = "joint6_flange"
+GROUP_NAME_ARM = "arm_group"
+GROUP_NAME_GRIPPER = "gripper"
+
+ARM_JOINT_NAMES = [
+    "joint2_to_joint1", "joint3_to_joint2", "joint4_to_joint3",
+    "joint5_to_joint4", "joint6_to_joint5", "joint6output_to_joint6"
+]
+GRIPPER_JOINT_NAMES = ["gripper_controller"]
+HOME_JOINTS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+GRIPPER_OPEN   =  0.0
+GRIPPER_CLOSED = -0.7
+
+TCP_OFFSET = 0.10
+PRE_GRASP_Z_OFFSET = 0.10
+GRASP_Z_OFFSET     = 0.07
+LIFT_Z_OFFSET      = 0.20
+
+BOX_HEIGHT_M = 0.20           # Box Height 20cm
+SAFE_HOVER_ABOVE_RIM = 0.10   # hover 10cm above the box rim to avoid collision when approaching
+RELEASE_BELOW_RIM    = 0.05   # place 5cm below the box rim
+# --------------------------------
+
+DOWN_QUAT = Quaternion(x=1.0, y=0.0, z=0.0, w=0.0)
+# -----------------------------------
+
+#FSM States
+class RobotState(Enum):
+   INITILIZATION = auto()           #INITILIZATION
+   MAPPING_LOCALIZATION = auto()    #SLAM
+   EXPLORATION_DETECTION = auto()   #Nav2 + YOLO + RGB-D
+   APPROACH = auto()                #Nav2
+   ARM_APPROACH_1 = auto()          #MoveIt2
+   GRASP = auto()                   #MoveIt2
+   ARM_APPROACH_2 = auto()          #MoveIt2
+   RETURN = auto()                  #Nav2
+   BIN_DETECTION = auto()           #YOLO
+   ARM_APPROACH_3 = auto()          #MoveIt2
+   PLACE = auto()                   #MoveIt2
+   ARM_APPROACH_4 = auto()          #MoveIt2
+   MISSION_COMPLETE = auto()                         
+
+#FSM Transition Events
+class FSMEvent(Enum):
+   ALL_HARDWARE_READY = auto()      # All hardware components (Nav2, MoveIt2, YOLO, Gripper, etc.) are ready for operation 
+   MAP_BUILT = auto()               # SLAM map is built and robot is localized
+   TARGET_DETECTED = auto()         # YOLO detects the target and provides the target pose
+   ARRIVE_AT_TARGET = auto()        # Nav2 reaches the target position
+   REACH_DESIGNATED_POSE = auto()   # Used for multiple transitions where the robot arm reaches a designated pose for grasping or placing
+   TARGET_IN_GRIPPER = auto()       # Used for multiple transitions where the target is successfully grasped and held in the gripper
+   TARGET_NOT_IN_GRIPPER = auto()   # Used for multiple transitions where the target is lost or not successfully grasped
+   ARM_RESET = auto()               # Arm reset to predefined pose after grasping or placing
+   ARRIVE_AT_START = auto()         # Arrive at the starting position for bin detection
+   BIN_FOUND = auto()               # Bin detected in the starting location
+   TARGET_PLACED = auto()           # Target placed in bin, check if more targets need to be picked and placed
+   ALL_TARGETS_PLACED = auto()      # All targets are placed in the bin, mission complete  
+
+#FSM Transition Table
+FSM_TRANSITION_TABLE = {
+
+   #Initialization -> Mapping+Localization
+   (RobotState.INITILIZATION,    FSMEvent.ALL_HARDWARE_READY):    RobotState.MAPPING_LOCALIZATION,
+
+   #Mapping+Localization -> Exploration & Object Detection
+   (RobotState.MAPPING_LOCALIZATION,    FSMEvent.MAP_BUILT):    RobotState.EXPLORATION_DETECTION,
+
+   #Exploration & Object Detection -> Approach
+   (RobotState.EXPLORATION_DETECTION,    FSMEvent.TARGET_DETECTED):    RobotState.APPROACH,
+
+   #Approach -> Arm Approach 1
+   (RobotState.APPROACH,    FSMEvent.ARRIVE_AT_TARGET):    RobotState.ARM_APPROACH_1,
+
+   #Arm Approach 1 -> Grasp
+   (RobotState.ARM_APPROACH_1,   FSMEvent.REACH_DESIGNATED_POSE):    RobotState.GRASP,
+
+   #Grasp -> Arm Approach 2
+   (RobotState.GRASP,    FSMEvent.TARGET_IN_GRIPPER):    RobotState.ARM_APPROACH_2,
+   #Grasp -> Exploration & Object Detection
+   (RobotState.GRASP,    FSMEvent.TARGET_NOT_IN_GRIPPER):    RobotState.EXPLORATION_DETECTION,
+
+   #Arm Approach 2 -> Return
+   (RobotState.ARM_APPROACH_2,    FSMEvent.ARM_RESET):    RobotState.RETURN,
+   #Arm Approach 2 -> Exploration & Object Detection
+   (RobotState.ARM_APPROACH_2,    FSMEvent.TARGET_NOT_IN_GRIPPER):    RobotState.EXPLORATION_DETECTION,
+
+   #Retrun -> Bin Detection
+   (RobotState.RETURN,    FSMEvent.ARRIVE_AT_START):    RobotState.BIN_DETECTION,
+   #Retrun -> Exploration & Object Detection
+   (RobotState.RETURN,    FSMEvent.TARGET_NOT_IN_GRIPPER):    RobotState.EXPLORATION_DETECTION,
+
+   #Bin Detection -> Arm Approach 3
+   (RobotState.BIN_DETECTION,    FSMEvent.BIN_FOUND):    RobotState.ARM_APPROACH_3,
+   #Bin Detection -> Exploration & Object Detection
+   (RobotState.BIN_DETECTION,    FSMEvent.TARGET_NOT_IN_GRIPPER):    RobotState.EXPLORATION_DETECTION,
+
+   #Arm Approach 3 -> Place
+   (RobotState.ARM_APPROACH_3,    FSMEvent.REACH_DESIGNATED_POSE):    RobotState.PLACE,
+   #Arm Approach 3 -> Exploration & Object Detection
+   (RobotState.ARM_APPROACH_3,    FSMEvent.TARGET_NOT_IN_GRIPPER):    RobotState.EXPLORATION_DETECTION,
+
+   #Place -> Arm Approach 4
+   (RobotState.PLACE,    FSMEvent.TARGET_PLACED):    RobotState.ARM_APPROACH_4,
+   #Place -> Mission Complete
+   (RobotState.PLACE,    FSMEvent.ALL_TARGETS_PLACED):    RobotState.MISSION_COMPLETE,
+
+   #Arm Approach 4 -> Exploration & Object Detection
+   (RobotState.ARM_APPROACH_4,    FSMEvent.ARM_RESET):    RobotState.EXPLORATION_DETECTION,
+
+}
+
+#Mission Control Node
+class RobotFSM(Node):
+
+   def __init__(self):
+      super().__init__('robot_fsm_node')
+      
+      #Current State
+      self.current_state = RobotState.INITILIZATION
+      self.previous_state= None
+
+      #Data 
+      self.start_pose: Pose = None           #Start position
+      self.target_pose: PoseStamped = None   #Target position
+      self.target_color: str = None          #Target colour
+      self.bin_pose: PoseStamped = None      #Bin position
+      self.detected_target: list = []        #Detected target list
+
+      # Store the latest detected colors for target and box, which can be updated in the respective callbacks and used for decision making in the FSM transitions
+      self.latest_cube_color = ''
+      self.latest_box_color = ''
+      
+      # 
+      self.pending_colors = ['red', 'blue', 'green'] #Example target colors, updated based on actual requirements
+      self.completed_targets = 0
+
+      #Track the sequence of arm approach steps (1 to 4) to determine which designated pose to move to and which action to execute in the arm approach states
+      self.arm_step_sequence = 0
+
+      # Place position coordinates (Hover, Release)
+      self.place_bx = 0.0
+      self.place_by = 0.0
+      self.place_hover_z = 0.0
+      self.place_release_z = 0.0 
+      
+      #Action/Condition Flags
+      self.nav_goal_reached = False          #if Nav2 goal is reached
+      self.arm_reached_pose = False          #if MoveIt2 manipulator reaches the designated pose
+      self.gripper_closed_empty = False      #if gripper is closed completely
+      self.gripper_holding_object = False    #if gripper is holding an object
+
+      #Nav2 Action Client
+      self.nav_client = ActionClient(
+         self,
+         NavigateToPose,
+         'navigate_to_pose'
+      )
+
+      #MoveIt2 Action Client
+      self.moveit_client = ActionClient(
+         self,
+         MoveGroup,
+         'move_action'
+      )
+
+      #State publisher
+      self.state_pub = self.create_publisher(
+         msg_type=String,
+         topic='/robot/fsm_state',
+         qos_profile=10
+      ) 
+
+      #SLAM Subscriber
+      self.slam_sub = self.create_subscription(
+         msg_type=Bool,
+         topic='/slam/map_ready',
+         callback=self.slam_callback,
+         qos_profile=10
+      )
+
+      #TF2 Listener
+      self.tf_buffer = Buffer()
+      self.tf_listener = TransformListener(self.tf_buffer, self)
+
+      #Target Subscriber
+      self.cube_pose_sub = self.create_subscription(
+         msg_type=PoseStamped,
+         topic='/cube_pose_camera',
+         callback=self.cube_pose_callback, #Callback function for YOLO detection result, which provides the target pose
+         qos_profile=10
+      )
+      self.cube_color_sub = self.create_subscription(
+         msg_type=String,
+         topic='/cube_color',
+         callback=self.cube_color_callback, #Callback to get the color information of the detected target cube
+         qos_profile=10
+      )
+
+      #Bin Subscriber
+      self.box_pose_sub = self.create_subscription(
+         msg_type=PoseStamped,
+         topic='/box_pose_camera',
+         callback=self.box_pose_callback, #Using the same callback for YOLO and bin detection
+         qos_profile=10 
+      )
+      self.box_color_sub = self.create_subscription(
+         msg_type=String,
+         topic='/box_color',
+         callback=self.box_color_callback, #Callback to get the color information of the detected box
+         qos_profile=10
+      )
+
+      #Gripper Subscriber
+      self.gripper_sub = self.create_subscription(
+         msg_type=Bool,
+         topic='/gripper/object_detected',
+         callback=self.gripper_callback,
+         qos_profile=10
+      )
+
+      #
+      self.map_is_ready = False
+      self.target_detected = False
+      self.target_in_gripper = False
+      self.target_not_in_gripper = False
+      self.bin_found = False
+      self.place_done = False
+
+      #FSM Timer
+      timer_period: float = 0.1
+      self.fsm_timer = self.create_timer(
+         timer_period,
+         self.fsm_spin
+      )
+      self.get_logger().info(f'{self.current_state.name}')
+
+   #FSM Spin
+   def fsm_spin(self):
+      """
+      
+      """
+      event = self.check_transition_condition()
+      #if FSM event is obtained
+      #then start state transition
+      if event is not None:
+         self.transition(event)
+
+   #State Transition
+   def transition(self, event: FSMEvent):
+      """Based on Event and Current State, execute Transition"""
+      key = (self.current_state, event)
+      next_state = FSM_TRANSITION_TABLE.get(key)
+
+      if next_state is None:
+
+         return
+
+      self.get_logger().info(f'State Transition: [{self.current_state.name}] -- ({event.name}) --> [{next_state.name}]')
+
+      self.previous_state = self.current_state
+      self.current_state = next_state
+
+      #Publish Current State
+      msg = String()
+      msg.data = self.current_state.name
+      self.state_pub.publish(msg)
+
+      #Execute entry action to new state
+      self.execute_state_action(self.current_state)
+
+   #Action of State
+   def execute_state_action(self, state: RobotState):
+      """
+      Moore FSM: output only depends on current state
+      """
+      action_map = {
+         RobotState.INITIALIZATION:           self.action_initialization,
+         RobotState.MAPPING_LOCALIZATION:    self.action_mapping_localization,
+         RobotState.EXPLORATION_DETECTION:   self.action_exploration_detection,
+         RobotState.APPROACH:                self.action_approach,
+         RobotState.ARM_APPROACH_1:          self.action_arm_approach_1,
+         RobotState.GRASP:                   self.action_grasp,
+         RobotState.ARM_APPROACH_2:          self.action_arm_approach_2,
+         RobotState.RETURN:                  self.action_return,
+         RobotState.BIN_DETECTION:           self.action_bin_detection,
+         RobotState.ARM_APPROACH_3:          self.action_arm_approach_3,
+         RobotState.PLACE:                   self.action_place,
+         RobotState.ARM_APPROACH_4:          self.action_arm_approach_4,
+         RobotState.MISSION_COMPLETE:        self.action_mission_complete,  
+      }
+      action = action_map.get(state)
+      if action:
+         action()
+
+   #[INITILIZATION] action
+   def action_initialization(self):
+
+      #
+      # 
+      #
+   
+   #[MAPPING_LOCALIZATION] action
+   def action_mapping_localization(self):
+
+      #
+      # 
+      # 
+
+   #[EXPLORATION_DETECTION] action
+   def action_exploration_detection(self):
+
+      #
+      #
+      #
+
+   #[APPROACH] action
+   def action_approach(self):
+      '''Use Nav2 to approach the target position detected by YOLO, 
+      target position is stored in 'self.target_pose', which is updated in 'yolo_callback' function. 
+      The Nav2 result is processed in 'nav_result_callback' function to set the 'nav_goal_reached' flag.'''
+
+      goal_msg = NavigateToPose.Goal()
+      goal_msg.pose = self.target_pose #Set target pose from YOLO detection result
+      future = self.nav_client.send_goal_async(goal_msg)
+      future.add_done_callback(self.nav_result_callback)
+      #
+      #
+      #
+
+   #[ARM_APPROACH_1] action: 
+   def action_arm_approach_1(self):
+      self.get_logger().info('Approaching target (Pre-grasp)...')
+      self._send_joint_goal_async(GROUP_NAME_GRIPPER, GRIPPER_JOINT_NAMES, [GRIPPER_OPEN], self._step_pre_grasp)
+
+   def _step_pre_grasp(self):
+      target = self._get_pose_in_base(self.target_pose)
+      if target:
+         x, y, z = target.position.x, target.position.y, target.position.z
+         self._move_to_pose_async(x, y, z + PRE_GRASP_Z_OFFSET, "pre-grasp", self._step_grasp_descend)
+
+   def _step_grasp_descend(self):
+      target = self._get_pose_in_base(self.target_pose)
+      if target:
+         x, y, z = target.position.x, target.position.y, target.position.z
+         # Move to grasp pose, which is directly above the target with a certain offset, and then execute the grasp action in the next step
+         self._move_to_pose_async(x, y, z + GRASP_Z_OFFSET, "grasp")
+   
+   #[GRASP] action
+   def action_grasp(self):
+      self.get_logger().info('Grasping target...')
+      self._send_joint_goal_async(GROUP_NAME_GRIPPER, GRIPPER_JOINT_NAMES, [GRIPPER_CLOSED])
+
+   #[ARM_APPROACH_2] action: 
+   def action_arm_approach_2(self):
+      self.get_logger().info('Lifting target...')
+      target = self._get_pose_in_base(self.target_pose)
+      if target:
+         x, y, z = target.position.x, target.position.y, target.position.z
+         self._move_to_pose_async(x, y, z + LIFT_Z_OFFSET, "lift", self._step_go_home_after_lift)
+
+   def _step_go_home_after_lift(self):
+      # After lifting the target, reset the arm to home position to prepare for navigation back to start and bin detection
+      self._send_joint_goal_async(GROUP_NAME_ARM, ARM_JOINT_NAMES, HOME_JOINTS)
+
+   #[RETURN] action
+   def action_return(self):
+      self.get_logger().info('Returning to start position...')
+      goal_msg = NavigateToPose.Goal()
+      goal_msg.pose = self.start_pose 
+      future = self.nav_client.send_goal_async(goal_msg)
+      future.add_done_callback(self.nav_result_callback)
+
+   #[BIN_DETECTION] action
+   def action_bin_detection(self):
+      self.get_logger().info('Scanning for the matching bin...')
+      #
+      #
+
+   #[ARM_APPROACH_3] action
+   def action_arm_approach_3(self):
+      self.get_logger().info('Hovering above the bin...')
+      target = self._get_pose_in_base(self.bin_pose)
+      if target:
+         bx, by, bz = target.position.x, target.position.y, target.position.z
+         
+         # Calculate the hover and release positions based on the detected bin pose and predefined offsets
+         box_rim_z = bz + BOX_HEIGHT_M
+         self.place_hover_z = box_rim_z + SAFE_HOVER_ABOVE_RIM
+         self.place_release_z = box_rim_z - RELEASE_BELOW_RIM
+         self.place_bx = bx
+         self.place_by = by
+
+         # First move to a hover position above the box rim to avoid collision, then in the callback move down to the release position inside the box for placing the target
+         self._move_to_pose_async(
+            self.place_bx, self.place_by, self.place_hover_z, 
+            "hover-above-bin", self._step_lower_to_release
+         )
+
+   def _step_lower_to_release(self):
+      self.get_logger().info('Lowering into the bin...')
+      # After hovering above the bin, move down to the release position inside the bin to prepare for placing the target 
+      # Then execute the place action in the next step 
+      self._move_to_pose_async(
+         self.place_bx, self.place_by, self.place_release_z, "release-point"
+      )
+   
+   #[PLACE] action
+   def action_place(self):
+      self.get_logger().info('Opening gripper to drop target...')
+      # 
+      self._send_joint_goal_async(
+         GROUP_NAME_GRIPPER, GRIPPER_JOINT_NAMES, [GRIPPER_OPEN], self._step_place_done
+      )
+
+   def _step_place_done(self):
+      self.get_logger().info('Target released successfully.')
+      self.place_done = True  # Set place done flag to trigger FSM transition, and then in the transition check if more targets need to be picked and placed or mission is complete
+
+   #[ARM_APPROACH_4] action
+   def action_arm_approach_4(self):
+      self.get_logger().info('Retreating above the bin...')
+      # After placing the target in the bin, move the arm back up to a safe hover position above the bin before navigating back to exploration and detection for the next target
+      self._move_to_pose_async(
+         self.place_bx, self.place_by, self.place_hover_z, 
+         "retreat-above-bin", self._step_go_home_after_place
+      )
+
+   def _step_go_home_after_place(self):
+      self.get_logger().info('Resetting arm to home...')
+      # After retreating above the bin, reset the arm to home position to prepare for the next round of exploration, detection, and picking
+      self._send_joint_goal_async(GROUP_NAME_ARM, ARM_JOINT_NAMES, HOME_JOINTS)
+
+
+   # =========================================================
+   # MoveIt2 Asynchronous Helpers
+   # =========================================================
+   def _send_joint_goal_async(self, group_name: str, joint_names: list, positions: list, callback=None):
+      goal = MoveGroup.Goal()
+      goal.request.group_name = group_name
+      con = Constraints()
+      for name, pos in zip(joint_names, positions):
+         jc = JointConstraint(joint_name=name, position=float(pos),
+                              tolerance_above=0.05, tolerance_below=0.05, weight=1.0)
+         con.joint_constraints.append(jc)
+      goal.request.goal_constraints.append(con)
+      
+      future = self.moveit_client.send_goal_async(goal)
+      if callback:
+         future.add_done_callback(lambda f: self._goal_response_callback(f, callback))
+      else:
+         future.add_done_callback(self.moveit_result_callback)
+
+   def _move_to_pose_async(self, x: float, y: float, z: float, label: str, callback=None):
+      flange_z = z + TCP_OFFSET
+      goal = MoveGroup.Goal()
+      goal.request.group_name = GROUP_NAME_ARM
+      
+      con = Constraints(name="goal")
+      pos = PositionConstraint(link_name=EEF_LINK)
+      pos.header.frame_id = BASE_LINK
+      
+      bv = BoundingVolume()
+      prim = SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[0.002])
+      target_pose = PoseStamped()
+      target_pose.pose.position.x = x
+      target_pose.pose.position.y = y
+      target_pose.pose.position.z = flange_z
+      bv.primitives.append(prim)
+      bv.primitive_poses.append(target_pose.pose)
+      pos.constraint_region = bv
+
+      ori = OrientationConstraint(link_name=EEF_LINK, orientation=DOWN_QUAT,
+                                  absolute_x_axis_tolerance=0.1, absolute_y_axis_tolerance=0.1,
+                                  absolute_z_axis_tolerance=0.1, weight=1.0)
+      ori.header.frame_id = BASE_LINK
+
+      con.position_constraints.append(pos)
+      con.orientation_constraints.append(ori)
+      goal.request.goal_constraints.append(con)
+
+      future = self.moveit_client.send_goal_async(goal)
+      if callback:
+         future.add_done_callback(lambda f: self._goal_response_callback(f, callback))
+      else:
+         future.add_done_callback(self.moveit_result_callback)
+
+   def _goal_response_callback(self, future, success_callback):
+      goal_handle = future.result()
+      if not goal_handle.accepted:
+         self.get_logger().error("MoveIt2 Goal Rejected!")
+         return
+      res_future = goal_handle.get_result_async()
+      res_future.add_done_callback(lambda f: self._action_result_callback(f, success_callback))
+
+   def _action_result_callback(self, future, success_callback):
+      result = future.result().result
+      if result.error_code.val == MoveItErrorCodes.SUCCESS:
+         success_callback()
+      else:
+         self.get_logger().warn(f"MoveIt2 Execution Failed with code: {result.error_code.val}")
+
+   def _get_pose_in_base(self, map_pose: PoseStamped) -> PoseStamped:
+      """Transforms a PoseStamped from 'map' to 'g_base' frame"""
+      try:
+         t = self.tf_buffer.lookup_transform(BASE_LINK, map_pose.header.frame_id, rclpy.time.Time())
+         return tf2_geometry_msgs.do_transform_pose(map_pose.pose, t)
+      except Exception as e:
+         self.get_logger().warn(f'Transform to {BASE_LINK} failed: {e}')
+         return None
+   
+
+   #Check Transition Event
+   def check_transition_condition(self) -> FSMEvent | None:
+
+      if self.current_state == RobotState.INITILIZATION:
+         if self.check_hardware_ready():
+            return FSMEvent.ALL_HARDWARE_READY
+         
+      elif self.current_state == RobotState.MAPPING_LOCALIZATION:
+         if self.map_is_ready:
+            return FSMEvent.MAP_BUILT
+         
+      elif self.current_state == RobotState.EXPLORATION_DETECTION:
+         if self.target_detected and self.target_pose is not None:
+            return FSMEvent.TARGET_DETECTED
+         
+      elif self.current_state == RobotState.APPROACH:
+         if self.check_arrived_at_target():
+            return FSMEvent.ARRIVE_AT_TARGET
+         
+      elif self.current_state == RobotState.ARM_APPROACH_1:
+         if self.reach_designated_pose():
+            return FSMEvent.REACH_DESIGNATED_POSE
+         
+      elif self.current_state == RobotState.GRASP:
+         if self.target_in_gripper:
+            return FSMEvent.TARGET_IN_GRIPPER
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER
+         
+      elif self.current_state == RobotState.ARM_APPROACH_2:
+         if self.arm_reset():
+            return FSMEvent.ARM_RESET
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER
+         
+      elif self.current_state == RobotState.RETURN:
+         if self.check_arrived_at_start():
+            return FSMEvent.ARRIVE_AT_START
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER
+      
+      elif self.current_state == RobotState.BIN_DETECTION:
+         if self.bin_found and self.bin_pose is not None:
+            self.bin_found = False #Reset flag
+            return FSMEvent.BIN_FOUND
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER
+         
+      elif self.current_state == RobotState.ARM_APPROACH_3:
+         if self.reach_designated_pose():
+            return FSMEvent.REACH_DESIGNATED_POSE
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER
+         
+      elif self.current_state == RobotState.PLACE:
+         if self.place_done:
+            self.place_done = False #Reset flag
+            
+            # Update completed targets count and pending colors list
+            self.completed_targets += 1
+            if self.target_color in self.pending_colors:
+               self.pending_colors.remove(self.target_color) #Remove completed target color from pending list
+
+            # Check if all targets are completed or no more pending colors
+            if self.completed_targets >= 3 or len(self.pending_colors) == 0: #Assuming we have 3 target objects to pick and place, update this condition based on your actual requirements
+               self.get_logger().info('All targets completed! Mission accomplished!')
+               return FSMEvent.ALL_TARGETS_PLACED
+            else:
+               return FSMEvent.TARGET_PLACED
+
+      elif self.current_state == RobotState.ARM_APPROACH_4:
+         if self.arm_reset():
+            return FSMEvent.ARM_RESET
+         elif self.target_not_in_gripper:
+            return FSMEvent.TARGET_NOT_IN_GRIPPER 
+
+      return None
+   
+   def check_hardware_ready(self) -> bool:
+      '''check if all hardware is ready for operation, including Nav2, MoveIt2, YOLO, Gripper, etc.'''
+
+      #
+      #
+      #
+      return self.map_is_ready
+   
+   def check_arrived_at_target(self) -> bool:
+      ''''check if Nav2 goal is reached, can be implemented by subscribing to Nav2 result topic or using Nav2 action client feedback/result'''
+
+      if self.nav_goal_reached:
+         self.nav_goal_reached = False #reset flag
+         return True
+      return False
+   
+   def check_arrived_at_start(self) -> bool:
+      '''''check if Nav2 goal is reached for returning to start position, can be implemented by subscribing to Nav2 result topic or using Nav2 action client feedback/result'''
+
+      if self.nav_goal_reached:
+         self.nav_goal_reached = False #reset flag
+         return True
+      return False
+   
+   def reach_designated_pose(self) -> bool:
+      '''check if MoveIt2 manipulator reaches the designated pose, can be implemented by subscribing to MoveIt2 result topic or using MoveIt2 action client feedback/result'''
+
+      if self.arm_reached_pose:
+         self.arm_reached_pose = False #reset flag
+         return True
+      return False
+   
+   def arm_reset(self) -> bool:
+      '''check if MoveIt2 manipulator resets to a predefined pose, can be implemented by subscribing to MoveIt2 result topic or using MoveIt2 action client feedback/result'''
+
+      if self.arm_reached_pose:
+         self.arm_reached_pose = False #reset flag
+         return True
+      return False
+
+   # Callbacks for Subscribers and Action Clients
+
+   def slam_callback(self, msg: Bool):
+      '''Callback function for SLAM map ready status'''
+      
+      if msg.data:
+         self.get_logger().info('Map is built.')
+         self.map_is_ready = True
+
+   def box_pose_callback(self, msg: PoseStamped):
+      '''Callback function for YOLO detection result, which provides the bin pose'''
+
+      if self.current_state == RobotState.BIN_DETECTION:
+
+         #Check if current detected box color matches current target color
+         if self.latest_box_color == self.target_color:
+            
+            try:
+               # Lookup transform from camera frame to map frame
+               t = self.tf_buffer.lookup_transform(
+                     'map', 
+                     msg.header.frame_id, 
+                     msg.header.stamp, 
+                     timeout=Duration(seconds=0.5))
+               
+               # Execute coordinate transformation
+               transformed_pose = tf2_geometry_msgs.do_transform_pose(msg.pose, t)
+               
+               self.bin_pose = PoseStamped()
+               self.bin_pose.header.frame_id = 'map'
+               self.bin_pose.pose = transformed_pose
+               
+               self.bin_found = True #Set bin found flag
+            except Exception as e:
+               self.get_logger().warn(f'Failed to transform box pose: {e}')
+            
+   def box_color_callback(self, msg: String):
+      '''Callback function for YOLO detection result, which provides the detected box color'''
+
+      self.latest_box_color = msg.data.lower() #Store the latest detected box color, convert to lowercase for easier comparison
+
+
+   def cube_pose_callback(self, msg: PoseStamped):
+      '''Callback function for YOLO detection result, which provides the target pose'''
+
+      if self.current_state == RobotState.EXPLORATION_DETECTION:
+
+         if self.latest_cube_color in self.pending_colors: #Check if the detected cube color is in the pending colors list
+
+            try:
+               # Lookup transform from camera frame to map frame
+               t = self.tf_buffer.lookup_transform(
+                     'map', 
+                     msg.header.frame_id, 
+                     msg.header.stamp, 
+                     timeout=Duration(seconds=0.5))
+               
+               # 执行坐标转换
+               transformed_pose = tf2_geometry_msgs.do_transform_pose(msg.pose, t)
+               
+               self.target_pose = PoseStamped()
+               self.target_pose.header.frame_id = 'map'
+               self.target_pose.pose = transformed_pose
+               self.target_color = self.latest_cube_color
+               
+               self.target_detected = True
+            except Exception as e:
+               self.get_logger().warn(f'Failed to transform cube pose: {e}')
+
+   def cube_color_callback(self, msg: String):
+      '''Callback function for YOLO detection result, which provides the detected target cube color'''
+
+      self.latest_cube_color = msg.data.lower() #Store the latest detected cube color, convert to lowercase for easier comparison
+
+   def nav_result_callback(self, future):
+      '''Callback function for Nav2 action result'''
+   
+      result = future.result().result
+      status = future.result().status
+
+      if status == 4: #SUCCEEDED
+         self.get_logger().info('Nav2 goal reached.')
+         self.nav_goal_reached = True #Set Nav2 goal reached flag
+      else:
+         self.get_logger().warn('Failed to reach Nav2 goal.')
+
+   def moveit_result_callback(self, future):
+      '''Callback function for MoveIt2 action result'''
+   
+      result = future.result().result
+
+      if result.error_code.val == MoveItErrorCodes.SUCCESS:
+         self.get_logger().info('MoveIt2 reached the designated pose.')
+         self.arm_reached_pose = True #Set Arm reached pose flag
+      else:
+         self.get_logger().warn('Failed to reach the designated pose with MoveIt2.')
+
+   def gripper_callback(self, msg: Bool):
+      '''Callback function for gripper object detection'''
+      
+      # Object detected in gripper
+      if msg.data:
+         if not self.target_in_gripper: #Only log when the state changes to avoid spamming logs
+            self.get_logger().info('Object detected in gripper.')
+         self.target_in_gripper = True #Set target in gripper flag
+         self.target_not_in_gripper = False #Reset target not in gripper flag
+      
+      # No object detected in gripper
+      else:
+         if not self.target_not_in_gripper: #Only log when the state changes to avoid
+            self.get_logger().info('No object detected in gripper.')
+         self.target_in_gripper = False
+         self.target_not_in_gripper = True
+
+         # If place 
+         if self.current_state == RobotState.PLACE:
+            self.get_logger().info('Object placed successfully!')
+            self.place_done = True #Set place done flag
+
+
+def main(args=None):
+   rclpy.init(args=args)
+   node = RobotFSM()
+   try:
+      rclpy.spin(node)
+   except KeyboardInterrupt:
+      pass
+   finally:
+      node.destroy_node()
+      rclpy.shutdown()
+
+if __name__ == '__main__':
+   main()
